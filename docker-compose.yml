@@ -1,0 +1,140 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  # PostgreSQL with pgvector
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: rag-postgres
+    environment:
+      POSTGRES_USER: rag_user
+      POSTGRES_PASSWORD: rag_password
+      POSTGRES_DB: rag_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag_user -d rag_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - rag-network
+
+  # FastAPI Application
+  api:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile
+    container_name: rag-api
+    environment:
+      # Database
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: rag_db
+      DB_USER: rag_user
+      DB_PASSWORD: rag_password
+      
+      # AWS (use localstack or actual credentials)
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      
+      # Application
+      ENVIRONMENT: development
+      DEBUG: "true"
+      LOG_LEVEL: INFO
+      
+      # Bedrock
+      BEDROCK_REGION: us-east-1
+      BEDROCK_LLM_MODEL_ID: anthropic.claude-3-5-sonnet-20241022-v2:0
+      BEDROCK_EMBEDDING_MODEL_ID: amazon.titan-embed-text-v2:0
+      
+      # S3 Buckets (create these in your AWS account or use localstack)
+      S3_BUCKET_DOCUMENTS: rag-system-documents-dev
+      S3_BUCKET_ARTIFACTS: rag-system-artifacts-dev
+      S3_BUCKET_EVAL_DATASETS: rag-system-eval-datasets-dev
+      
+      # Security
+      SECRET_KEY: dev-secret-key-change-in-production
+      
+      # Observability (optional)
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY}
+      LANGSMITH_PROJECT: rag-development
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/app/app
+      - ./graph:/app/graph
+      - ./rag:/app/rag
+      - ./eval:/app/eval
+      - ./db:/app/db
+      - ./observability:/app/observability
+      - ./feedback:/app/feedback
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - rag-network
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # LocalStack (for local AWS services)
+  localstack:
+    image: localstack/localstack:latest
+    container_name: rag-localstack
+    environment:
+      SERVICES: s3,secretsmanager
+      DEBUG: 1
+      DATA_DIR: /tmp/localstack/data
+      DOCKER_HOST: unix:///var/run/docker.sock
+    ports:
+      - "4566:4566"  # LocalStack gateway
+    volumes:
+      - localstack_data:/tmp/localstack
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - rag-network
+
+  # PgAdmin (optional, for database management)
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: rag-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - postgres
+    networks:
+      - rag-network
+    profiles:
+      - tools
+
+  # Redis (optional, for caching)
+  redis:
+    image: redis:7-alpine
+    container_name: rag-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - rag-network
+    profiles:
+      - caching
+
+volumes:
+  postgres_data:
+  pgadmin_data:
+  localstack_data:
+  redis_data:
+
+networks:
+  rag-network:
+    driver: bridge
